@@ -1,0 +1,158 @@
+core food prod
+with imps as (
+    select 
+      DISTINCT 
+      g.CUSTOMER_ID,
+      ga_sessions_date,
+      UNIQUE_VISIT_ID,
+      PRODUCT_PART_NUMBER,
+      unique_hit_id
+    from  ga.ga_sessions_hits_products as g
+    left join "EDLDB"."ECOM_SANDBOX"."PREMIUM_PRODUCT_LIST" as p
+      on g.PRODUCT_ID = p.PRODUCT_ID
+    join "EDLDB"."ECOM_SANDBOX"."PREMIUM_CUSTOMER_LIST" as c
+      on g.CUSTOMER_ID = c.CUSTOMER_ID
+       // where c.CUSTOMER_ID IS NULL
+        where p.PRODUCT_ID is NULL
+        and ga_sessions_date >='2022-03-01'
+        and ga_sessions_date <'2022-05-31'
+        and EVENT_CATEGORY='eec' 
+        and (page_path LIKE '%/b/%' OR page_path LIKE '/' OR page_path LIKE '%/dp/%') //get impressions from PLPs, home page and deatil page
+        and event_action = 'impression'
+        and g.CUSTOMER_ID  is not null
+        and dataset = 'web' 
+        and is_bot = false
+        and PRODUCT_MERCH_CLASSIFICATION2 = 'Core Food'
+  ),
+  clks as (
+    select
+      g.CUSTOMER_ID,
+      ga_sessions_date,
+      UNIQUE_VISIT_ID,
+      PRODUCT_PART_NUMBER,
+      COUNT(DISTINCT unique_hit_id) as CLK_COUNT,
+      COUNT(DISTINCT V2_PRODUCT_NAME) as DETAIL_COUNT
+    from  ga.ga_sessions_hits_products as g
+    left join "EDLDB"."ECOM_SANDBOX"."PREMIUM_PRODUCT_LIST" as p
+      on g.PRODUCT_ID = p.PRODUCT_ID
+    join "EDLDB"."ECOM_SANDBOX"."PREMIUM_CUSTOMER_LIST" as c
+      on g.CUSTOMER_ID = c.CUSTOMER_ID
+     // where c.CUSTOMER_ID IS NULL
+      where p.PRODUCT_ID is NULL
+      and ga_sessions_date >='2022-03-01'
+      and ga_sessions_date <'2022-05-31'
+      and EVENT_CATEGORY='eec' 
+      and (page_path LIKE '%/b/%' OR page_path LIKE '/' OR page_path LIKE '%/dp/%')
+      and event_action in ('productClick','productclick')
+      and g.CUSTOMER_ID  is not null
+      and dataset = 'web' 
+      and is_bot = false
+      and PRODUCT_MERCH_CLASSIFICATION2 = 'Core Food'
+      group by g.CUSTOMER_ID,ga_sessions_date,UNIQUE_VISIT_ID,PRODUCT_PART_NUMBER
+  ),
+  purch as (
+    select
+      DISTINCT 
+      g.CUSTOMER_ID,
+      ga_sessions_date,
+      UNIQUE_VISIT_ID,
+      PRODUCT_PART_NUMBER,
+      COUNT(DISTINCT UNIQUE_HIT_ID) as PURCH_COUNT,
+      SUM(PRODUCT_PRICE) as PRODUCT_PRICE,
+      SUM(PRODUCT_REVENUE) as PRODUCT_REVENUE,
+      MAX(TRANSACTION_REVENUE) as TRANSACTION_REVENUE
+    from  ga.ga_sessions_hits_products_union as g
+    left join "EDLDB"."ECOM_SANDBOX"."PREMIUM_PRODUCT_LIST" as p
+      on g.PRODUCT_ID = p.PRODUCT_ID
+    join "EDLDB"."ECOM_SANDBOX"."PREMIUM_CUSTOMER_LIST" as c
+      on g.CUSTOMER_ID = c.CUSTOMER_ID
+    //  where c.CUSTOMER_ID IS NULL
+      where p.PRODUCT_ID is NULL
+      and ga_sessions_date >='2022-03-01'
+      and ga_sessions_date <'2022-05-31'
+      and EVENT_CATEGORY='eec' 
+      and event_action = 'purchase'
+      and g.CUSTOMER_ID  is not null
+      and dataset = 'web' 
+      and is_bot = false
+      and TRANSACTION_ID is not null
+      and PRODUCT_MERCH_CLASSIFICATION2 = 'Core Food'
+      group by g.CUSTOMER_ID,ga_sessions_date,UNIQUE_VISIT_ID,PRODUCT_PART_NUMBER
+  ),
+  pruch_click as (
+    select DISTINCT 
+      a.CUSTOMER_ID,
+      a.ga_sessions_date,
+      a.UNIQUE_VISIT_ID as CLK_UNIQUE_VISIT_ID,
+      b.UNIQUE_VISIT_ID as PURCH_UNIQUE_VISIT_ID,
+      a.PRODUCT_PART_NUMBER as CLK_PRODUCT_PART_NUMBER,
+      b.PRODUCT_PART_NUMBER as PURCH_PRODUCT_PART_NUMBER,
+      a.CLK_COUNT as CLK_COUNT,
+      a.DETAIL_COUNT as DETAIL_COUNT,
+      b.PURCH_COUNT as PURCH_COUNT,
+      b.PRODUCT_PRICE as PRODUCT_PRICE,
+      b.PRODUCT_REVENUE as PRODUCT_REVENUE,
+      b.TRANSACTION_REVENUE as TRANSACTION_REVENUE
+    from clks a
+      LEFT OUTER JOIN purch b 
+      ON a.CUSTOMER_ID = b.CUSTOMER_ID
+      AND a.UNIQUE_VISIT_ID = b.UNIQUE_VISIT_ID
+      AND a.PRODUCT_PART_NUMBER = b.PRODUCT_PART_NUMBER 
+  ),
+  imp_count as (
+    select 
+      CUSTOMER_ID,
+      ga_sessions_date,
+      UNIQUE_VISIT_ID,
+      PRODUCT_PART_NUMBER,
+      COUNT(DISTINCT unique_hit_id) as IMP_COUNT
+    from imps 
+      group by CUSTOMER_ID,ga_sessions_date,UNIQUE_VISIT_ID,PRODUCT_PART_NUMBER
+  ),
+    imp_clk_purch as (
+      select
+        a.CUSTOMER_ID,
+        a.ga_sessions_date,
+        a.UNIQUE_VISIT_ID as IMP_UNIQUE_VISIT_ID,
+        b.CLK_UNIQUE_VISIT_ID as CLK_UNIQUE_VISIT_ID,
+        b.PURCH_UNIQUE_VISIT_ID as PURCH_UNIQUE_VISIT_ID,
+        a.PRODUCT_PART_NUMBER as IMP_PRODUCT_PART_NUMBER,
+        b.CLK_PRODUCT_PART_NUMBER as CLK_PRODUCT_PART_NUMBER,
+        b.PURCH_PRODUCT_PART_NUMBER as PURCH_PRODUCT_PART_NUMBER,
+        a.IMP_COUNT as IMP_COUNT,
+        b.CLK_COUNT as CLK_COUNT,
+        b.DETAIL_COUNT as DETAIL_COUNT,
+        b.PURCH_COUNT as PURCH_COUNT,
+        b.PRODUCT_PRICE as PRODUCT_PRICE,
+        b.PRODUCT_REVENUE as PRODUCT_REVENUE,
+        b.TRANSACTION_REVENUE as TRANSACTION_REVENUE
+      from imp_count a
+        LEFT OUTER JOIN pruch_click b 
+        ON a.CUSTOMER_ID = b.CUSTOMER_ID
+        AND a.UNIQUE_VISIT_ID = b.CLK_UNIQUE_VISIT_ID
+        AND a.PRODUCT_PART_NUMBER = b.CLK_PRODUCT_PART_NUMBER 
+  ),
+    cust_agg as (
+     select
+        CUSTOMER_ID,
+        SUM(IMP_COUNT) as IMP_COUNT,
+        zeroifnull(SUM(CLK_COUNT)) as CLK_COUNT,
+        zeroifnull(SUM(DETAIL_COUNT)) as DETAIL_COUNT,
+        zeroifnull(SUM(PURCH_COUNT)) as PURCH_COUNT,
+        zeroifnull(SUM(PRODUCT_REVENUE)) as PRODUCT_REVENUE,
+        zeroifnull(SUM(TRANSACTION_REVENUE)) as TRANSACTION_REVENUE
+     from imp_clk_purch
+        group by CUSTOMER_ID 
+  )
+     select
+        //$somename as data_label,
+        COUNT(CUSTOMER_ID) as GA_CUSTOMER_COUNT,
+        SUM(IMP_COUNT) as IMP_COUNT,
+        SUM(CLK_COUNT) as CLK_COUNT,
+        SUM(PURCH_COUNT) as PURCH_COUNT,
+        SUM(TRANSACTION_REVENUE) as TRANSACTION_REVENUE,
+        SUM(PRODUCT_REVENUE) as PRODUCT_REVENUE,
+        SUM(CLK_COUNT)*100/SUM(IMP_COUNT) as CTR,
+        (SUM(PURCH_COUNT)*100)/SUM(CLK_COUNT) as CVR_BYCLICK,
+        (SUM(PURCH_COUNT)*100)/SUM(DETAIL_COUNT) as BTD,
+        (SUM(PRODUCT_REVENUE)*1000)/SUM(IMP_COUNT) as REV_PER_K from cust_agg

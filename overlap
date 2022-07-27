@@ -1,0 +1,53 @@
+overlap
+with pdp as (
+      select 
+          DISTINCT CUSTOMER_ID,
+          COUNT(DISTINCT page_path) as uniq_pb_pdp_visits,
+          COUNT(DISTINCT CASE WHEN PRODUCT_PART_NUMBER in (select DISTINCT PART_NUMBER from ECOM_SANDBOX.PREMIUM_PRODUCT_LIST) then page_path else null end) as pr_uniq_pdp_views
+      from  ga.ga_sessions_hits_products
+          where ga_sessions_date >='2022-03-01'
+          and ga_sessions_date <'2022-06-01'
+          and EVENT_CATEGORY='eec' 
+          and (page_path LIKE '%/dp/%')
+          and event_action = 'detail'
+          //and PRODUCT_PART_NUMBER in (select DISTINCT PART_NUMBER from ECOM_SANDBOX.PREMIUM_PRODUCT_LIST)
+          and CUSTOMER_ID  is not null
+          and dataset = 'web' 
+          and is_bot = false
+          group by CUSTOMER_ID
+          having pr_uniq_pdp_views > 2
+    ),
+  search_terms as (
+    select DISTINCT CUSTOMER_ID
+    from ga.ga_sessions_hits_products
+    where ga_sessions_date >='2022-03-01'
+    and ga_sessions_date <'2022-06-01'
+    and EVENT_CATEGORY='eec' 
+    and event_action = 'impression' 
+    and CUSTOMER_ID  is not null
+    and dataset = 'web' 
+    and is_bot = false
+    and HIT_CUSTOM_ATTRIBUTES:ecomm_pagetype = 'searchresults'
+    and HIT_CUSTOM_ATTRIBUTES:search_input_keyword is not null
+    and ( jarowinkler_similarity( lower(HIT_CUSTOM_ATTRIBUTES:search_input_keyword), 'instinct') > 85 or
+          jarowinkler_similarity( lower(HIT_CUSTOM_ATTRIBUTES:search_input_keyword), 'stella') > 85 or
+          jarowinkler_similarity( lower(HIT_CUSTOM_ATTRIBUTES:search_input_keyword), 'weruva') > 85 or
+          jarowinkler_similarity( lower(HIT_CUSTOM_ATTRIBUTES:search_input_keyword), 'tiki') > 85 or
+          jarowinkler_similarity( lower(HIT_CUSTOM_ATTRIBUTES:search_input_keyword), 'wellness') > 85 or
+          jarowinkler_similarity( lower(HIT_CUSTOM_ATTRIBUTES:search_input_keyword), 'zignature') > 85 or
+          jarowinkler_similarity( lower(HIT_CUSTOM_ATTRIBUTES:search_input_keyword), 'merrick') > 85 or
+          jarowinkler_similarity( lower(HIT_CUSTOM_ATTRIBUTES:search_input_keyword), 'honest') > 85 or
+          jarowinkler_similarity( lower(HIT_CUSTOM_ATTRIBUTES:search_input_keyword), 'orijen') > 85 or
+          jarowinkler_similarity( lower(HIT_CUSTOM_ATTRIBUTES:search_input_keyword), 'fromm') > 85
+    )
+  ),
+  all_pr_web_cust as (
+    select CUSTOMER_ID from pdp UNION select CUSTOMER_ID from search_terms
+  ) 
+
+SELECT 
+    DISTINCT p.CUSTOMER_ID
+FROM all_pr_web_cust as a
+//FROM "EDLDB"."ECOM_SANDBOX"."PREMIUM_TWO_ORDERS" as a
+JOIN "EDLDB"."ECOM_SANDBOX"."PREMIUM_CUSTOMER_LIST" as p
+on a.CUSTOMER_ID = p.CUSTOMER_ID;

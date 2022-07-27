@@ -1,0 +1,6 @@
+S3 to snowflake
+COPY INTO ECOM_SANDBOX.PB_CONS_CUST_SAMPLE_LIST
+from 's3://content-segment/kailin/PB_CONS_CUST_SAMPLE_LIST.csv'
+storage_integration = sbx_chewy_bi_s3_nebula_int
+file_format=(type=csv, FIELD_DELIMITER = ',', skip_header=1,COMPRESSION = NONE);
+commit;

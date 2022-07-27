@@ -1,0 +1,745 @@
+Asset_reordering
+CREATE
+OR REPLACE TABLE ECOM_SANDBOX.CMS_BASE_SEG_SV AS           //This table takes every CMS click or impression event
+SELECT
+  sessions_date_est,
+  sessions_hour_est,
+  device_category,
+  cms_level,
+  placement_slot_uid,
+  placement_slot_number as widget_position,
+  widget_type,
+  widget_type_value,
+  zone,
+  widget_name,
+  widget_id,
+  creative_id,
+  creative_position,
+  creative_name,
+  product_sku,
+  page_type,
+  event_timestamp,
+  authentication_state,
+  page_path_extension,
+  event_action,
+  event_name,
+  event_timestamp as hit_number,
+  unique_visit_id,
+  unique_hit_id,
+  target_segment
+from
+  (
+    SELECT                                            //Start of query from base segment_hits_productS_union table
+      date(
+        convert_timezone(
+          'UTC',
+          'America/New_York',
+          session_start_timestamp                     //all timestamps in Segment tables are UTC unless stated otherwise
+        )
+      ) as sessions_date_est,
+      hour(
+        convert_timezone(
+          'UTC',
+          'America/New_York',
+          session_start_timestamp                     //We attribute all metrics back to the hour in which the session began
+        )
+      ) as sessions_hour_est,
+      event_timestamp,
+      Device_category,                                //populated using userAgent field from SFW
+      case
+        when (
+          widget_type != 'product-carousel'
+          and event_label = Promotion_name
+        )
+        OR (
+          widget_type in (
+            'product-carousel',
+            'chewy-choice',
+            'standard-sku-collection'
+          )
+          and event_action = 'impression'
+          and (event_label != 'sendData')
+        ) then 'widget'
+        else 'asset'
+      end as cms_level,                               //Existing CMS logic
+      Placement_slot_uid,
+      placement_slot_number,
+      widget_type,
+      widget_type_value,
+      coalesce(Promotion_name, product_list, event_label) as widget_name,                 //Existing CMS logic
+     
+      case
+        when right(
+          left (regexp_substr(widget_name, '(zone-).*'), 7),
+          1
+        ) ilike '-' then left (regexp_substr(widget_name, '(zone-).*'), 6)
+        else left (regexp_substr(widget_name, '(zone-).*'), 7)
+      end zone,                                                               //zone held within widget_name string
+      seg.widget_id,
+      creative_id,
+      to_char(
+        to_number(
+          case
+            when (
+              widget_type != 'product-carousel'
+              and event_label = Promotion_name
+            )
+            OR (
+              widget_type in (
+                'product-carousel',
+                'chewy-choice',
+                'standard-sku-collection'
+              )
+              and event_action = 'impression'
+              and event_label != 'sendData'
+            ) then NULL
+            else coalesce(try_to_numeric(promo_position), product_position)
+          end
+        )
+      ) as creative_position,                       //Existing CMS logic
+      coalesce(
+        Promotion_creative,
+        product_name,
+        creative_name,
+        event_label
+      ) as creative_name,                           //Existing CMS logic
+      product_sku,
+      page_type,
+      event_action,
+      event_name,
+      properties :authenticationState :: string as authentication_state,          //field not yet mapped to column in table, but available in JSON 'properties'
+      properties :targetSegment :: string as target_segment,                      //field not yet mapped to column in table, but available in JSON 'properties'
+      path_name as page_path_extension,                           //column for url is path_name, renamed here for convenience
+      event_id as unique_hit_id,                                //renaming Segment columns to match the GA names for convenience
+      session_id as unique_visit_id
+    From
+      segment.segment_hits_products_union seg
+    where
+      sessions_date_est >= '2022-02-10' and sessions_date_est <= '2022-02-17'
+      and SESSION_TRAITS :isBot :: string ilike 'false' ----cms impressions/clicks promo click, impressions - product/promo. //session_traits is json object holding identifiers from the last pageview of a session
+      and (
+        (
+          row_type = 'hit'                                                      //segment_hits_products_union has hit level and product level rows. Only want hit level for promo evnets, product level for sku carousels
+          and lower(event_name) in ('promotion viewed', 'promotion clicked')
+        )
+        or (
+          row_type = 'product'
+          and lower(event_name) in ('product list viewed', 'product clicked')
+        )
+      )
+      and creative_id is not null                             //Existing CMS logic
+      AND (
+        (
+          widget_type IS NOT NULL
+          AND widget_type != ''
+          AND widget_type != 'undefined'
+        )
+        or(event_label = 'hero promo')
+      )
+      AND (
+        (
+          (
+            widget_type :: string in (
+              'product-carousel',
+              'chewy-choice',
+              'standard-sku-collection'
+            ) -- all product carousels irrespective of cms for cleaner cms events
+            and promotion_name is null
+            and promotion_creative is null
+            and promo_position is null
+          )
+          or (
+            widget_type in (
+              'product-carousel',
+              'chewy-choice',
+              'standard-sku-collection'
+            )
+          )
+          and event_label like '%shop-all%'
+        )
+        or (
+          widget_type :: string != 'product-carousel'
+          and promotion_name not like '%facet%'
+          and promotion_name not like 'sub-category-nav'
+          and promotion_name not like '%left-nav-%'
+          and promotion_name not like 'left-nav'
+        )
+        or (event_label = 'hero promo')
+      )
+  );
+
+commit;
+
+CREATE
+OR REPLACE TABLE ECOM_SANDBOX.purchase_segment_metrics_SV AS (         //makes table of all purchase events in segment
+  SELECT
+    ordr.*,
+    IFNULL(
+      LAG(PURCHASE_HIT) IGNORE NULLS OVER (
+        PARTITION BY unique_visit_id
+        ORDER BY
+          PURCHASE_HIT
+      ),
+      SESSION_START_TIMESTAMP                         //if a purchase was the first one in the session, then the previous purchase time is defaulted to session start time
+    ) AS PREV_PURCHASE_HIT                          //makes a column to say when the purchase was, AND when the previous purchase was. We Only attribute a click with one purchase, uses this for join logic
+  FROM
+    (
+      select
+        sessions_date_est,
+        SESSION_START_TIMESTAMP,
+        unique_visit_id,
+        purchase_hit,
+        transaction_id,
+        sum(transaction_revenue) as transaction_revenue,      //sums up product level order info into order level totals, renaming to match GA conventions
+        sum(transaction_units) as transaction_units
+      from
+        (
+          select
+            DATE(
+              CONVERT_TIMEZONE(
+                'UTC',
+                'America/New_York',
+                SESSION_START_TIMESTAMP
+              )
+            ) AS sessions_date_est,
+            SESSION_START_TIMESTAMP,
+            SESSION_ID as unique_visit_id,
+            order_id as transaction_id,
+            EVENT_TIMESTAMP AS PURCHASE_HIT,
+            product_quantity * product_price as transaction_revenue,          //takes product level price*quantity as revenue (merch sales)
+            product_quantity as transaction_units
+          from
+            segment.segment_hits_products_union as a
+          where
+            SESSION_TRAITS :isBot :: string ilike 'false'
+            --and sessions_date_est >= current_date -3
+            and sessions_date_est between '2022-02-10' and '2022-02-17'
+            and row_type <> 'hit'                           //only want product level rows from the union table
+            and (
+              event_name ilike 'Order Completed'        //main identifier for Segment events
+              and hit_first_order is not null           //Logic used in existing Segment KPIs dashboard
+              and order_type in ('ORD', 'REC')          //Logic used in existing Segment KPIs dashboard
+            )
+        ) p
+      group by
+        sessions_date_est,
+        unique_visit_id,
+        purchase_hit,
+        transaction_id,
+        SESSION_START_TIMESTAMP
+    ) ordr
+);
+
+commit;
+
+
+CREATE
+or replace TABLE ecom_sandbox.seg_cms_purchases_sv as            //joins every click event from above back onto every individual CMS click from base table
+select
+  b.sessions_date_est,
+  b.unique_visit_id,
+  a.hit_number,
+  a.event_action,
+  b.purchase_hit,
+  b.prev_purchase_hit,
+  b.transaction_revenue,
+  b.transaction_units,
+  count(distinct b.transaction_id) as orders            //count of transaction_id's joined onto a given click is expected to be 1 always
+from
+  (
+    select
+      sessions_date_est,
+      unique_visit_id,
+      hit_number,
+      event_timestamp,
+      event_action
+    from
+      ecom_sandbox.cms_base_seg_sv
+    where
+      event_action != 'impression'                    //only clicks can be attributed revenue/orders
+  ) a
+  inner join ecom_sandbox.purchase_segment_metrics_sv b on a.sessions_date_est = b.sessions_date_est
+  and a.unique_visit_id = b.unique_visit_id
+  and a.hit_number <= b.purchase_hit                //if the click took place before a purchase, and after another purchase (or the start of the session) then it gets attributed the order
+  and a.hit_number >= b.prev_purchase_hit
+group by
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8;
+
+
+CREATE
+or replace TABLE ecom_sandbox.cms_purchases_attribution_sv AS with cte as (        //this cte counts how many clicks each order was attributed to
+  select
+    sessions_date_est as seg_sessions_date,
+    unique_visit_id,
+    purchase_hit,
+    sum(orders) as total_clicks                                       //this column from previous table is expected to be 1 for every click, summing returns number of clicks that the transaction_id was joined onto
+  from
+    ecom_sandbox.seg_cms_purchases_sv
+  group by
+    1,
+    2,
+    3
+)
+select                                //temp table returns the orders attributed to every CMS click, dividing the attributed metrics by the number of clicks they were attributed to
+  a.*,
+  b.total_clicks,
+  transaction_revenue / total_clicks as attributed_revenue,
+  transaction_units / total_clicks as attributed_units,
+  orders / total_clicks as attributed_order
+from
+  ecom_sandbox.seg_cms_purchases_sv a
+  left join cte b on a.sessions_date_est = b.seg_sessions_date
+  and a.unique_visit_id = b.unique_visit_id
+  and a.purchase_hit = b.purchase_hit;
+
+
+
+
+
+
+
+CREATE
+OR REPLACE TABLE ECOM_SANDBOX.autoship_purchase_segment_hits_sv AS (
+  SELECT
+    ordr.*,
+    IFNULL(
+      LAG(PURCHASE_HIT) IGNORE NULLS OVER (
+        PARTITION BY unique_visit_id
+        ORDER BY
+          PURCHASE_HIT
+      ),
+      SESSION_START_TIMESTAMP
+    ) AS PREV_PURCHASE_HIT
+  FROM
+    (
+      select
+        sessions_date_est,
+        SESSION_START_TIMESTAMP,
+        unique_visit_id,
+        purchase_hit,
+        transaction_id,
+        sum(transaction_revenue) as transaction_revenue,
+        sum(transaction_units) as transaction_units
+      from
+        (
+          select
+            DATE(
+              CONVERT_TIMEZONE(
+                'UTC',
+                'America/New_York',
+                SESSION_START_TIMESTAMP
+              )
+            ) AS sessions_date_est,
+            SESSION_START_TIMESTAMP,
+            SESSION_ID as unique_visit_id,
+            order_id as transaction_id,
+            EVENT_TIMESTAMP AS PURCHASE_HIT,
+            product_quantity * product_price as transaction_revenue,              //this doesnt take into account autoship discounts, GA cms report does
+            product_quantity as transaction_units
+          from
+            segment.segment_hits_products_union as a
+          where
+            SESSION_TRAITS :isBot :: string ilike 'false'
+            --and sessions_date_est >= current_date -3
+            and sessions_date_est between '2022-02-10' and '2022-02-17'
+            and event_label in ('RepeatOrder-Autoship', 'FirstOrder-Autoship')
+            and row_type <> 'hit'
+            and (
+              event_name ilike 'Order Completed'
+              and hit_first_order is not null
+              and order_type in ('REC')                         //logic used in Segment KPIs dashboard for autoship orders
+            )
+        ) ap
+      group by
+        sessions_date_est,
+        unique_visit_id,
+        purchase_hit,
+        transaction_id,
+        SESSION_START_TIMESTAMP
+    ) ordr
+);
+
+commit;
+
+
+
+CREATE
+or replace TABLE ecom_sandbox.autoship_purchases_sv as --ON COMMIT PRESERVE ROWS AS
+select
+  sessions_date_est,
+  unique_visit_id,
+  purchase_hit,
+  transaction_id,
+  prev_purchase_hit,
+  sum(transaction_revenue) as transaction_revenue,
+  sum(transaction_units) as transaction_units
+from
+  ecom_sandbox.autoship_purchase_segment_hits_sv --- table usage?
+group by
+  1,
+  2,
+  3,
+  4,
+  5
+order by
+  unique_visit_id,
+  purchase_hit;
+
+commit;
+
+
+
+
+CREATE
+or replace TABLE ecom_sandbox.cms_autoship_purchases_sv as --ON COMMIT PRESERVE ROWS AS
+select
+  b.sessions_date_est,
+  b.unique_visit_id,
+  a.hit_number,
+  a.event_action,
+  b.purchase_hit,
+  b.prev_purchase_hit,
+  b.transaction_revenue,
+  b.transaction_units,
+  count(distinct b.transaction_id) as orders
+from
+  (
+    select
+      sessions_date_est,
+      unique_visit_id,
+      hit_number,
+      event_timestamp,
+      event_action
+    from
+      ecom_sandbox.cms_base_seg_sv
+    where
+      event_action != 'impression'
+  ) a
+  inner join ecom_sandbox.autoship_purchases_sv b on a.sessions_date_est = b.sessions_date_est
+  and a.unique_visit_id = b.unique_visit_id
+  and a.hit_number <= b.purchase_hit
+  and a.hit_number >= b.prev_purchase_hit
+group by
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8;
+  
+  
+  
+  
+  
+CREATE
+or replace TABLE ecom_Sandbox.cms_autoship_purchases_attribution_sv as --ON COMMIT PRESERVE ROWS AS
+with cte as (
+  select
+    sessions_date_est,
+    unique_visit_id,
+    purchase_hit,
+    sum(orders) as total_clicks
+  from
+    ecom_Sandbox.cms_autoship_purchases_sv
+  group by
+    1,
+    2,
+    3
+)
+select
+  a.*,
+  b.total_clicks,
+  transaction_revenue / total_clicks as attributed_revenue,
+  transaction_units / total_clicks as attributed_units,
+  orders / total_clicks as attributed_order
+from
+  ecom_Sandbox.cms_autoship_purchases_sv a
+  left join cte b on a.sessions_date_est = b.sessions_date_est
+  and a.unique_visit_id = b.unique_visit_id
+  and a.purchase_hit = b.purchase_hit;
+  
+
+CREATE OR REPLACE TABLE ecom_sandbox.visit_customer_mapping_sv as 
+SELECT *
+FROM(
+SELECT DISTINCT 
+session_id as unique_visit_id, 
+CUSTOMER_ID,
+ROW_NUMBER() OVER (PARTITION BY UNIQUE_VISIT_ID ORDER BY CUSTOMER_ID ASC) AS RN
+FROM segment.segment_hits_products_union 
+
+WHERE CAST(session_start_timestamp AS DATE) >= '2022-02-10'  
+AND CAST(session_start_timestamp AS DATE) <= '2022-02-17'
+      and SESSION_TRAITS :isBot :: string ilike 'false' ----cms impressions/clicks promo click, impressions - product/promo. //session_traits is json object holding identifiers from the last pageview of a session
+      and (
+        (
+          row_type = 'hit'                                                      //segment_hits_products_union has hit level and product level rows. Only want hit level for promo evnets, product level for sku carousels
+          and lower(event_name) in ('promotion viewed', 'promotion clicked')
+        )
+        or (
+          row_type = 'product'
+          and lower(event_name) in ('product list viewed', 'product clicked')
+        )
+      )
+      and creative_id is not null                             //Existing CMS logic
+      AND (
+        (
+          widget_type IS NOT NULL
+          AND widget_type != ''
+          AND widget_type != 'undefined'
+        )
+        or(event_label = 'hero promo')
+      )
+      AND (
+        (
+          (
+            widget_type :: string in (
+              'product-carousel',
+              'chewy-choice',
+              'standard-sku-collection'
+            ) -- all product carousels irrespective of cms for cleaner cms events
+            and promotion_name is null
+            and promotion_creative is null
+            and promo_position is null
+          )
+          or (
+            widget_type in (
+              'product-carousel',
+              'chewy-choice',
+              'standard-sku-collection'
+            )
+          )
+          and event_label like '%shop-all%'
+        )
+        or (
+          widget_type :: string != 'product-carousel'
+          and promotion_name not like '%facet%'
+          and promotion_name not like 'sub-category-nav'
+          and promotion_name not like '%left-nav-%'
+          and promotion_name not like 'left-nav'
+        )
+        or (event_label = 'hero promo')
+      )
+  )
+  WHERE RN = 1;
+  
+  
+  commit;
+  
+  
+CREATE OR REPLACE TABLE ecom_sandbox.ctr_temp_zone10_sv as   
+  select
+  sessions_date_est,
+  chewy_financial_reporting_period,
+  DEVICE_CATEGORY,
+  CMS_LEVEL,
+  PLACEMENT_SLOT_UID,
+  widget_position,
+  WIDGET_TYPE,
+  WIDGET_TYPE_VALUE,
+  ZONE,
+  WIDGET_NAME,
+  WIDGET_ID,
+  CREATIVE_ID,
+  CREATIVE_POSITION,
+  CREATIVE_NAME,
+  PRODUCT_SKU,
+  PAGE_TYPE,
+  authentication_state,
+  page_path_extension,
+  target_Segment,
+  IS_PUPPY_PP,
+      IS_PUPPY_OL,
+      IS_PUPPY_WEB,
+      IS_PUPPY_ML,
+      IS_KITTEN_PP,
+      IS_KITTEN_OL,
+      IS_KITTEN_WEB,
+      IS_KITTEN_ML,
+  sum(clicks) segment_clicks,
+  sum(impressions) segment_impressions,
+  sum(
+    case
+      when cms_level ilike 'widget'
+      or (
+        cms_level ilike 'asset'
+        and widget_type in (
+          'product-carousel',
+          'chewy-choice',
+          'standard-sku-collection'
+        )
+        and creative_position = '1'
+      ) then Impressions
+    end
+  ) as widget_segment_views,
+  sum(
+    case
+      when cms_level ilike 'asset' then impressions
+    end
+  ) as asset_segment_views,
+  --sum(Clicks) as segment_clicks, 
+  sum(
+    case
+      when cms_level ilike 'widget' then clicks
+    end
+  ) as widget_segment_clicks,
+  sum(
+    case
+      when cms_level ilike 'asset' then clicks
+    end
+  ) as asset_segment_clicks,
+  sum(
+    case
+      when (
+        cms_level ilike 'widget'
+        and (
+          widget_position = '10'
+          or widget_position = '1-10'
+        )
+      )
+      or (
+        cms_level ilike 'asset'
+        and widget_type ilike 'hero promo'
+      ) then impressions
+    end
+  ) as page_impressions,
+  sum(attributed_revenue) as attributed_revenue,
+  sum(attributed_units) as attributed_units,
+  sum(attributed_order) as attributed_order,
+  sum(autoship_attributed_revenue) as autoship_attributed_revenue,
+  sum(autoship_attributed_units) as autoship_attributed_units,
+  sum(autoship_attributed_order) as autoship_attributed_order
+from
+  (
+    select
+      a.sessions_date_est,
+      chewy_financial_reporting_period,
+      a.device_category,
+      authentication_state,
+      cms_level,
+      placement_slot_uid,
+      widget_position,
+      widget_type,
+      widget_type_value,
+      zone,
+      widget_name,
+      widget_id,
+      creative_id,
+      creative_position,
+      creative_name,
+      product_sku,
+      page_type,
+      page_path_extension,
+      target_segment as target_segment,
+      COALESCE(IS_PUPPY_PP,0) AS IS_PUPPY_PP,
+    COALESCE(IS_PUPPY_OL,0) AS IS_PUPPY_OL,
+    COALESCE(IS_PUPPY_WEB,0) AS IS_PUPPY_WEB,
+    CASE WHEN COALESCe(IS_PUPPY_PROBA,0) >= 0.5 THEN 1 ELSE 0 END AS IS_PUPPY_ML,
+    COALESCE(IS_KITTEN_PP,0) AS IS_KITTEN_PP,
+    COALESCE(IS_KITTEN_OL,0) AS IS_KITTEN_OL,
+    COALESCE(IS_KITTEN_WEB,0) AS IS_KITTEN_WEB,
+    CASE WHEN COALESCe(IS_KITTEN_PROBA,0) >= 0.7 THEN 1 ELSE 0 END AS IS_KITTEN_ML,
+
+      count(
+        distinct case
+          when event_name ilike '%Click%' then unique_hit_id
+        end
+      ) as clicks,
+      count(
+        distinct case
+          when event_name ilike '%View%' then unique_hit_id
+        end
+      ) as impressions,
+      sum(coalesce(b.attributed_revenue, 0)) as attributed_revenue,
+      sum(coalesce(b.attributed_units, 0)) as attributed_units,
+      sum(coalesce(b.attributed_order, 0)) as attributed_order,
+      sum(coalesce(c.attributed_revenue, 0)) as autoship_attributed_revenue,
+      sum(coalesce(c.attributed_units, 0)) as autoship_attributed_units,
+      sum(coalesce(c.attributed_order, 0)) as autoship_attributed_order
+    from
+      ecom_sandbox.cms_base_seg_sv a
+   join ecom_sandbox.visit_customer_mapping_sv map
+    on a.unique_visit_id = map.unique_visit_id
+    
+    LEFT join ECOM_SANDBOX.LIFE_STAGE_SEGMENT_TEST seg
+    on CAST(map.customer_id AS VARCHAR(125))= CAST(seg.customer_id AS VARCHAR(125))
+    
+      left join ecom_sandbox.cms_purchases_attribution_sv b on a.sessions_date_est = b.sessions_date_est
+      and a.unique_visit_id = b.unique_visit_id
+      and a.hit_number = b.hit_number
+      left join ecom_sandbox.cms_autoship_purchases_attribution_sv c on a.sessions_date_est = c.sessions_date_est
+      and a.unique_visit_id = c.unique_visit_id
+      and a.hit_number = c.hit_number
+      left join ecom.common_date e on a.sessions_date_est = e.common_date_dttm
+    
+   where page_type = 'home' AND ZONE = 'zone-10'
+    group by
+      a.sessions_date_est,
+      chewy_financial_reporting_period,
+      device_category,
+      authentication_state,
+      cms_level,
+    placement_slot_uid,
+      widget_position,
+      widget_type,
+      widget_type_value,
+      zone,
+      widget_name,
+      widget_id,
+      creative_id,
+      creative_position,
+      creative_name,
+      product_sku,
+      page_type,
+      page_path_extension,
+      target_segment,
+      IS_PUPPY_PP,
+      IS_PUPPY_OL,
+      IS_PUPPY_WEB,
+      IS_PUPPY_ML,
+      IS_KITTEN_PP,
+      IS_KITTEN_OL,
+      IS_KITTEN_WEB,
+      IS_KITTEN_ML
+  )
+group by
+  sessions_date_est,
+  chewy_financial_reporting_period,
+  device_category,
+  authentication_state,
+  cms_level,
+  placement_slot_uid,
+  widget_position,
+  widget_type,
+  widget_type_value,
+  zone,
+  widget_name,
+  widget_id,
+  creative_id,
+  creative_position,
+  creative_name,
+  product_sku,
+  page_type,
+  page_path_extension,
+  target_segment,
+  IS_PUPPY_PP,
+  IS_PUPPY_OL,
+  IS_PUPPY_WEB,
+  IS_PUPPY_ML,
+  IS_KITTEN_PP,
+  IS_KITTEN_OL,
+  IS_KITTEN_WEB,
+  IS_KITTEN_ML;
+  
+  commit;
+  
+SELECT * FROM ecom_sandbox.ctr_temp_sv

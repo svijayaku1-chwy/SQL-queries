@@ -1,0 +1,23 @@
+Premium cust base query
+CREATE OR REPLACE TABLE "EDLDB"."ECOM_SANDBOX"."PREMIUM_CUSTOMER_LIST" as
+  select CUSTOMER_ID,PREM_RATIO from (
+      select 
+        DISTINCT 
+        ca.CUSTOMER_ID,
+          DIV0(
+          COUNT(DISTINCT (CASE when ol.PART_NUMBER in (select DISTINCT PART_NUMBER from ECOM_SANDBOX.PREMIUM_PRODUCT_LIST) THEN ol.ORDER_ID ELSE NULL END))*100,
+          COUNT(DISTINCT ol.ORDER_ID)) 
+          as PREM_RATIO
+      from CDM.CUSTOMER_AGGREGATE ca
+      INNER JOIN ecom.order_line ol
+          ON ol.CUSTOMER_ID = ca.CUSTOMER_ID
+          //AND ol.ORDER_PLACED_DTTM >= '2021-01-01'
+          //AND ca.REGISTRATION_CANCEL_DATE is null
+          //AND ca.REGISTRATION_DATE >= '2018-01-01'
+      INNER JOIN pdm.product pd
+          ON ol.PRODUCT_ID = pd.PRODUCT_ID
+          AND OL.ORDER_STATUS NOT IN ('X', 'P', 'J')
+          AND pd.MERCH_CLASSIFICATION1 in ('Consumables','Premium')
+      group by ca.CUSTOMER_ID
+      having COUNT(DISTINCT ol.ORDER_ID) <= 3
+    ) where PREM_RATIO >= 20
